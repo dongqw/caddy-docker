@@ -9,11 +9,22 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/caddy-docker
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+
+  # 阿里云配置：从 GitHub Secrets 读取
+  # 如果这些 Secrets 没有配置，阿里云推送步骤会自动跳过
+  ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+  ALIYUN_NAME_SPACE: ${{ secrets.ALIYUN_NAME_SPACE }}
+  ALIYUN_REGISTRY_USER: ${{ secrets.ALIYUN_REGISTRY_USER }}
+  ALIYUN_REGISTRY_PASSWORD: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+  # 镜像名动态取当前仓库名
+  ALIYUN_IMAGE_NAME: ${{ github.event.repository.name }}
 
 jobs:
   docker:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       packages: write
@@ -35,11 +46,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
+      - name: Check Aliyun Registry config
+        id: aliyun
+        shell: bash
+        run: |
+          if [ -n "${ALIYUN_REGISTRY}" ] && \
+             [ -n "${ALIYUN_NAME_SPACE}" ] && \
+             [ -n "${ALIYUN_REGISTRY_USER}" ] && \
+             [ -n "${ALIYUN_REGISTRY_PASSWORD}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Aliyun push is enabled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Aliyun push is disabled because one or more Aliyun secrets are missing."
+          fi
+
+      - name: Log in to Aliyun Registry
+        if: steps.aliyun.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ALIYUN_REGISTRY }}
+          username: ${{ env.ALIYUN_REGISTRY_USER }}
+          password: ${{ env.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Extract GHCR metadata
+        id: meta-ghcr
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+            type=ref,event=tag
+
+      - name: Extract Aliyun metadata
+        id: meta-aliyun
+        if: steps.aliyun.outputs.enabled == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAME_SPACE }}/${{ env.ALIYUN_IMAGE_NAME }}
           tags: |
             type=raw,value=latest
             type=sha
@@ -52,5 +97,7 @@ jobs:
           file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.meta-ghcr.outputs.tags }}
+            ${{ steps.aliyun.outputs.enabled == 'true' && steps.meta-aliyun.outputs.tags || '' }}
+          labels: ${{ steps.meta-ghcr.outputs.labels }}
